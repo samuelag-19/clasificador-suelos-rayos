@@ -5,3 +5,5 @@ pyogrio==0.7.2
 numpy==1.24.3
 pandas==2.0.3
 pyhdf==0.11.3
+gdown==5.1.0
+ 
