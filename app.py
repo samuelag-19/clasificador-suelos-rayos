@@ -49,8 +49,7 @@ def cargar_datos():
                 gdown.download(
                     f'https://drive.google.com/uc?id={HDF_ID}&confirm=t',
                     hdf_path,
-                    quiet=False,
-                    timeout=120
+                    quiet=False
                 )
         
         st.success("✅ Datos descargados correctamente")
