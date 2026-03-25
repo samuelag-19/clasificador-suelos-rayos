@@ -1,12 +1,11 @@
 import streamlit as st
 import numpy as np
-import h5py
 import pandas as pd
 import gdown
 import os
 import sqlite3
-import requests
-from io import BytesIO
+import warnings
+warnings.filterwarnings('ignore')
 
 # Configuración de página
 st.set_page_config(
@@ -38,43 +37,43 @@ def cargar_datos():
         # Descargar GPKG si no existe
         if not os.path.exists(gpkg_path) or os.path.getsize(gpkg_path) < 1000:
             with st.spinner("⏳ Descargando mapa de suelos IGAC..."):
-                try:
-                    gdown.download(
-                        f'https://drive.google.com/uc?id={GPKG_ID}&confirm=t',
-                        gpkg_path,
-                        quiet=False
-                    )
-                except:
-                    st.warning("⚠️ Usando descarga alternativa para GPKG...")
+                gdown.download(
+                    f'https://drive.google.com/uc?id={GPKG_ID}&confirm=t',
+                    gpkg_path,
+                    quiet=False
+                )
         
-        # Descargar HDF si no existe o está corrupto
+        # Descargar HDF si no existe
         if not os.path.exists(hdf_path) or os.path.getsize(hdf_path) < 100000:
             with st.spinner("⏳ Descargando datos de rayos ISS/LIS..."):
-                try:
-                    gdown.download(
-                        f'https://drive.google.com/uc?id={HDF_ID}&confirm=t',
-                        hdf_path,
-                        quiet=False,
-                        timeout=60
-                    )
-                except Exception as e:
-                    st.error(f"Error en descarga: {e}")
-                    return None, None, None
+                gdown.download(
+                    f'https://drive.google.com/uc?id={HDF_ID}&confirm=t',
+                    hdf_path,
+                    quiet=False,
+                    timeout=120
+                )
         
-        st.success("✅ Datos cargados correctamente")
+        st.success("✅ Datos descargados correctamente")
         
-        # Verificar integridad del HDF
+        # Intentar leer HDF con netCDF4 o scipy
         try:
-            with h5py.File(hdf_path, 'r') as hdf:
-                lat = hdf['Latitude'][:]
-                lon = hdf['Longitude'][:]
-                Ng_grid = hdf['flashrate'][:]
-        except Exception as e:
-            st.error(f"❌ Error leyendo HDF: {e}")
-            # Intentar eliminar archivo corrupto
-            if os.path.exists(hdf_path):
-                os.remove(hdf_path)
-            return None, None, None
+            import netCDF4
+            nc = netCDF4.Dataset(hdf_path, 'r')
+            lat = np.array(nc['Latitude'][:])
+            lon = np.array(nc['Longitude'][:])
+            Ng_grid = np.array(nc['flashrate'][:])
+            nc.close()
+        except:
+            # Fallback: usar h5py con configuración especial
+            try:
+                import h5py
+                with h5py.File(hdf_path, 'r', libver='latest', swmr=False) as hdf:
+                    lat = np.array(hdf['Latitude'][:])
+                    lon = np.array(hdf['Longitude'][:])
+                    Ng_grid = np.array(hdf['flashrate'][:])
+            except Exception as e:
+                st.error(f"No se pudo leer HDF: {e}")
+                return None, None, False
         
         # Leer GeoPackage con sqlite3
         try:
@@ -94,7 +93,7 @@ def cargar_datos():
             
             if not feature_table:
                 st.error("❌ No se encontró tabla de features en el GeoPackage")
-                return None, None, None
+                return None, None, False
             
             # Cargar todas las features
             cursor.execute(f"SELECT * FROM {feature_table};")
