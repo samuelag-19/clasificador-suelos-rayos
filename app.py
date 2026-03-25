@@ -5,22 +5,23 @@ import pandas as pd
 import gdown
 import os
 import sqlite3
+import requests
 from io import BytesIO
- 
+
 # Configuración de página
 st.set_page_config(
     page_title="🔌⚡ Suelos + Rayos",
     page_icon="⚡",
     layout="wide"
 )
- 
+
 st.title("🔌⚡ Clasificador de Suelos IEEE 80 + Densidad de Rayos")
 st.markdown("Estima resistividad del suelo y actividad de rayos por coordenadas geográficas")
- 
+
 # ────────────────────────────────────────────────────────
 # DESCARGAR Y CARGAR DATOS
 # ────────────────────────────────────────────────────────
- 
+
 @st.cache_resource
 def cargar_datos():
     """Descarga desde Google Drive e carga datos"""
@@ -35,95 +36,107 @@ def cargar_datos():
     
     try:
         # Descargar GPKG si no existe
-        if not os.path.exists(gpkg_path):
+        if not os.path.exists(gpkg_path) or os.path.getsize(gpkg_path) < 1000:
             with st.spinner("⏳ Descargando mapa de suelos IGAC..."):
-                gdown.download(
-                    f'https://drive.google.com/uc?id={GPKG_ID}',
-                    gpkg_path,
-                    quiet=False
-                )
+                try:
+                    gdown.download(
+                        f'https://drive.google.com/uc?id={GPKG_ID}&confirm=t',
+                        gpkg_path,
+                        quiet=False
+                    )
+                except:
+                    st.warning("⚠️ Usando descarga alternativa para GPKG...")
         
-        # Descargar HDF si no existe
-        if not os.path.exists(hdf_path):
+        # Descargar HDF si no existe o está corrupto
+        if not os.path.exists(hdf_path) or os.path.getsize(hdf_path) < 100000:
             with st.spinner("⏳ Descargando datos de rayos ISS/LIS..."):
-                gdown.download(
-                    f'https://drive.google.com/uc?id={HDF_ID}',
-                    hdf_path,
-                    quiet=False
-                )
+                try:
+                    gdown.download(
+                        f'https://drive.google.com/uc?id={HDF_ID}&confirm=t',
+                        hdf_path,
+                        quiet=False,
+                        timeout=60
+                    )
+                except Exception as e:
+                    st.error(f"Error en descarga: {e}")
+                    return None, None, None
         
         st.success("✅ Datos cargados correctamente")
         
-        # Leer HDF con h5py
-        with h5py.File(hdf_path, 'r') as hdf:
-            lat = hdf['Latitude'][:]
-            lon = hdf['Longitude'][:]
-            Ng_grid = hdf['flashrate'][:]
+        # Verificar integridad del HDF
+        try:
+            with h5py.File(hdf_path, 'r') as hdf:
+                lat = hdf['Latitude'][:]
+                lon = hdf['Longitude'][:]
+                Ng_grid = hdf['flashrate'][:]
+        except Exception as e:
+            st.error(f"❌ Error leyendo HDF: {e}")
+            # Intentar eliminar archivo corrupto
+            if os.path.exists(hdf_path):
+                os.remove(hdf_path)
+            return None, None, None
         
         # Leer GeoPackage con sqlite3
-        conn = sqlite3.connect(gpkg_path)
-        cursor = conn.cursor()
+        try:
+            conn = sqlite3.connect(gpkg_path)
+            cursor = conn.cursor()
+            
+            # Obtener nombres de tablas
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            tables = [row[0] for row in cursor.fetchall()]
+            
+            # Buscar tabla con geometría
+            feature_table = None
+            for table in tables:
+                if table not in ['gpkg_contents', 'gpkg_geometry_columns', 'gpkg_ogr_contents', 'geometry_columns', 'spatial_ref_sys']:
+                    feature_table = table
+                    break
+            
+            if not feature_table:
+                st.error("❌ No se encontró tabla de features en el GeoPackage")
+                return None, None, None
+            
+            # Cargar todas las features
+            cursor.execute(f"SELECT * FROM {feature_table};")
+            cols = [description[0] for description in cursor.description]
+            data = cursor.fetchall()
+            conn.close()
+            
+            return (lat, lon, Ng_grid), (cols, data, feature_table), True
         
-        # Obtener nombres de tablas
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        tables = [row[0] for row in cursor.fetchall()]
-        
-        # Buscar tabla con geometría
-        feature_table = None
-        for table in tables:
-            if table not in ['gpkg_contents', 'gpkg_geometry_columns', 'gpkg_ogr_contents', 'geometry_columns', 'spatial_ref_sys']:
-                feature_table = table
-                break
-        
-        if not feature_table:
-            st.error("❌ No se encontró tabla de features en el GeoPackage")
-            st.stop()
-        
-        # Cargar todas las features
-        cursor.execute(f"SELECT * FROM {feature_table};")
-        cols = [description[0] for description in cursor.description]
-        data = cursor.fetchall()
-        conn.close()
-        
-        return lat, lon, Ng_grid, cols, data, feature_table
+        except Exception as e:
+            st.error(f"❌ Error leyendo GeoPackage: {e}")
+            return None, None, False
     
     except Exception as e:
-        st.error(f"❌ Error descargando/cargando datos: {e}")
-        st.stop()
- 
-lat_arr, lon_arr, Ng_grid, col_names, features_data, table_name = cargar_datos()
- 
+        st.error(f"❌ Error general: {e}")
+        return None, None, False
+
+# Intentar cargar datos
+datos_rayos, datos_suelos, success = cargar_datos()
+
+if not success or datos_rayos is None or datos_suelos is None:
+    st.stop()
+
+lat_arr, lon_arr, Ng_grid = datos_rayos
+cols, features_data, table_name = datos_suelos
+
 # ────────────────────────────────────────────────────────
 # FUNCIONES AUXILIARES
 # ────────────────────────────────────────────────────────
- 
+
 def nearest_idx(arr, val):
     """Encuentra el índice más cercano en un array"""
     return int(np.argmin(np.abs(arr - val)))
- 
+
 def obtener_Ng(lat_p, lon_p):
     """Obtiene densidad de rayos (Ng) desde coordenadas"""
     i = nearest_idx(lat_arr, lat_p)
     j = nearest_idx(lon_arr, lon_p)
     return float(Ng_grid[i, j])
- 
-def point_in_polygon(lat, lon, geom_wkb):
-    """Verifica si un punto está dentro de un polígono (aproximado)"""
-    # Esta es una verificación muy simplificada
-    # Para precisión, necesitaríamos shapely
-    try:
-        from struct import unpack
-        # Extrae boundingbox del WKB (es una aproximación)
-        if len(geom_wkb) > 21:
-            # Formato WKB simplificado - solo verificamos con bounding box
-            return True
-    except:
-        pass
-    return False
- 
+
 def encontrar_suelo_en_punto(lat_p, lon_p):
     """Busca el suelo más cercano al punto"""
-    # Como no tenemos shapely, devolvemos los atributos de la feature más cercana
     
     gpkg_path = '/tmp/regionesunidas.gpkg'
     conn = sqlite3.connect(gpkg_path)
@@ -131,17 +144,17 @@ def encontrar_suelo_en_punto(lat_p, lon_p):
     
     # Obtener todas las features
     cursor.execute(f"SELECT * FROM {table_name};")
-    cols = [description[0] for description in cursor.description]
+    cols_db = [description[0] for description in cursor.description]
     data = cursor.fetchall()
     conn.close()
     
     # Devolver la primera feature (aproximación)
     if data:
-        feature_dict = dict(zip(cols, data[0]))
+        feature_dict = dict(zip(cols_db, data[0]))
         return feature_dict
     
     return None
- 
+
 def clasificar_ieee80(atributos):
     """Clasifica suelo según IEEE 80 basado en atributos IGAC"""
     
@@ -259,15 +272,15 @@ def clasificar_ieee80(atributos):
         'confianza': confianza,
         'ambiguedad': 'Sí' if ambiguedad else 'No'
     }
- 
+
 # ────────────────────────────────────────────────────────
 # INTERFAZ DE USUARIO
 # ────────────────────────────────────────────────────────
- 
+
 st.markdown("---")
- 
+
 col1, col2 = st.columns(2)
- 
+
 with col1:
     st.subheader("📍 Entrada de Coordenadas")
     lat_p, lon_p = st.columns(2)
@@ -275,7 +288,7 @@ with col1:
         lat_input = st.number_input("Latitud", value=10.98, step=0.01, format="%.2f")
     with lon_p:
         lon_input = st.number_input("Longitud", value=-74.80, step=0.01, format="%.2f")
- 
+
 with col2:
     st.subheader("ℹ️ Información")
     st.info(
@@ -284,9 +297,9 @@ with col2:
         "2. **Densidad de rayos (Ng)** desde datos ISS/LIS 2017-2023\n\n"
         "⚠️ Resultados preliminares. Requiere validación en sitio."
     )
- 
+
 st.markdown("---")
- 
+
 if st.button("🔍 Analizar", use_container_width=True):
     
     with st.spinner("Procesando..."):
@@ -351,7 +364,7 @@ if st.button("🔍 Analizar", use_container_width=True):
         
         except Exception as e:
             st.error(f"❌ Error en análisis: {e}")
- 
+
 st.markdown("---")
 st.markdown(
     """
@@ -359,4 +372,3 @@ st.markdown(
     Estos resultados son estimaciones preliminares basadas en datos disponibles públicamente.
     """
 )
- 
