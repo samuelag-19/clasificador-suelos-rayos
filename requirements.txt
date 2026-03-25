@@ -1,0 +1,7 @@
+streamlit==1.28.1
+geopandas==0.14.0
+shapely==2.0.2
+pyogrio==0.7.2
+numpy==1.24.3
+pandas==2.0.3
+pyhdf==0.11.3
